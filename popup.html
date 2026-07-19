@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { 
+      width: 220px; 
+      font-family: system-ui, -apple-system, sans-serif; 
+      padding: 12px; 
+      margin: 0; 
+      text-align: center; 
+      background-color: #ffffff;
+    }
+    h3 { 
+      margin-top: 0; 
+      margin-bottom: 8px;
+      color: #1e293b; 
+      font-size: 14px; 
+      font-weight: 700;
+    }
+    button { 
+      width: 100%; 
+      padding: 10px; 
+      border: none; 
+      border-radius: 6px; 
+      background: #6366f1; 
+      color: white; 
+      font-weight: bold; 
+      cursor: pointer; 
+      font-size: 13px; 
+      transition: background 0.2s ease;
+    }
+    button:hover { 
+      background: #4f46e5; 
+    }
+    #msg { 
+      font-size: 11px; 
+      color: #64748b; 
+      margin-top: 8px; 
+      line-height: 1.6;
+    }
+  </style>
+</head>
+<body>
+  <!-- ★「Step Recorder」の文字はお好きな名前に変更できます -->
+  <h3>Step Recorder</h3>
+  <button id="startCapture"> キャプチャを開始</button>
+  <div id="msg">開始するとWeb画面の左下に<br>操作パネル（✅️ ⏹️ 🗑️）が出現します</div>
+  
+  <script src="popup.js"></script>
+</body>
+</html>
