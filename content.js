@@ -1,8 +1,8 @@
-// グローバル変数の定義
-window.highlightOverlay = window.highlightOverlay || null;
-window.controllerPanel = window.controllerPanel || null;
-window.hoveredElement = window.hoveredElement || null;
-window.isPaused = window.isPaused || false;
+// グローバル変数の定義（ローカル変数を明示し、window と同期）
+let highlightOverlay = window.highlightOverlay || null;
+let controllerPanel = window.controllerPanel || null;
+let hoveredElement = window.hoveredElement || null;
+let isPaused = window.isPaused || false;
 
 // ページ読み込み時に録画ステータスをチェックして自動復元
 chrome.storage.local.get(['isRecording'], (result) => {
@@ -20,6 +20,17 @@ window.initCaptureEnvironment = function() {
   startTracking();
 };
 
+// 敏感入力かどうかを判定（マスク/記録除外ルール）
+function isSensitiveInput(el) {
+  if (!el || (!el.name && !el.id && !el.type && !el.placeholder)) return false;
+  const lower = ((el.name || '') + ' ' + (el.id || '') + ' ' + (el.placeholder || '')).toLowerCase();
+  const sensitiveKeywords = ['password', 'pass', 'card', 'cc', 'credit', 'cvv', 'ssn', 'social', 'dob', 'birth', 'pin'];
+  if (sensitiveKeywords.some(k => lower.includes(k))) return true;
+  const sensitiveTypes = ['password', 'tel'];
+  if (sensitiveTypes.includes((el.type || '').toLowerCase())) return true;
+  return false;
+}
+
 // 1. ハイライト用うす赤い枠の生成
 function createHighlightOverlay() {
   if (document.getElementById('tango-highlight-overlay')) return;
@@ -32,9 +43,10 @@ function createHighlightOverlay() {
     box-shadow: 0 0 8px rgba(239, 68, 68, 0.4);
   `;
   document.body.appendChild(highlightOverlay);
+  window.highlightOverlay = highlightOverlay;
 }
 
-// 2. 画面左下コントローラーの生成（シンプルなフラットデザイン）
+// 2. 画面左下コントローラーの生成（innerHTML を使わず安全に要素を作成）
 function createControlPanel() {
   if (document.getElementById('tango-controller-panel')) return;
   
@@ -48,111 +60,174 @@ function createControlPanel() {
     user-select: none; border: 1px solid #334155;
   `;
   
-  // ★ツール名「Step Recorder」と各ボタン（✓ ⏸ 🗑）のデザイン
-  controllerPanel.innerHTML = `
-    <span style="font-size:11px; font-weight:600; margin-right:6px; color:#94a3b8;">Step Recorder</span>
-    <button id="tango-done" style="background:#22c55e; border:none; color:white; border-radius:4px; width:26px; height:26px; font-size:12px; font-weight:bold; cursor:pointer; display:flex; align-items:center; justify-content:center;" title="完了">✓</button>
-    <button id="tango-pause" style="background:#334155; border:none; color:white; border-radius:4px; width:26px; height:26px; font-size:11px; font-weight:bold; cursor:pointer; display:flex; align-items:center; justify-content:center;" title="一時停止">⏸</button>
-    <button id="tango-cancel" style="background:#ef4444; border:none; color:white; border-radius:4px; width:26px; height:26px; font-size:12px; font-weight:bold; cursor:pointer; display:flex; align-items:center; justify-content:center;" title="破棄">🗑</button>
-  `;
+  const title = document.createElement('span');
+  title.textContent = 'Step Recorder';
+  title.style.cssText = 'font-size:11px; font-weight:600; margin-right:6px; color:#94a3b8;';
+  controllerPanel.appendChild(title);
+
+  const btnDone = document.createElement('button');
+  btnDone.id = 'tango-done';
+  btnDone.title = '完了';
+  btnDone.textContent = '✓';
+  btnDone.style.cssText = 'background:#22c55e; border:none; color:white; border-radius:4px; width:26px; height:26px; font-size:12px; font-weight:bold; cursor:pointer; display:flex; align-items:center; justify-content:center;';
+
+  const btnPause = document.createElement('button');
+  btnPause.id = 'tango-pause';
+  btnPause.title = '一時停止';
+  btnPause.setAttribute('aria-pressed', String(isPaused));
+  btnPause.textContent = '⏸';
+  btnPause.style.cssText = 'background:#334155; border:none; color:white; border-radius:4px; width:26px; height:26px; font-size:11px; font-weight:bold; cursor:pointer; display:flex; align-items:center; justify-content:center;';
+
+  const btnCancel = document.createElement('button');
+  btnCancel.id = 'tango-cancel';
+  btnCancel.title = '破棄';
+  btnCancel.textContent = '🗑';
+  btnCancel.style.cssText = 'background:#ef4444; border:none; color:white; border-radius:4px; width:26px; height:26px; font-size:12px; font-weight:bold; cursor:pointer; display:flex; align-items:center; justify-content:center;';
+
+  controllerPanel.appendChild(btnDone);
+  controllerPanel.appendChild(btnPause);
+  controllerPanel.appendChild(btnCancel);
+
   document.body.appendChild(controllerPanel);
+  window.controllerPanel = controllerPanel;
 
   // イベント登録
-  document.getElementById('tango-done').addEventListener('click', finishWorkflow);
-  document.getElementById('tango-pause').addEventListener('click', togglePause);
-  document.getElementById('tango-cancel').addEventListener('click', cancelWorkflow);
+  btnDone.addEventListener('click', finishWorkflow);
+  btnPause.addEventListener('click', togglePause);
+  btnCancel.addEventListener('click', cancelWorkflow);
 }
 
 // 3. マウスストーキング（追従）および入力の監視開始
 function startTracking() {
+  // focusout を使ってバブリングで捕まえる（blur はバブリングしない）
   document.removeEventListener('mouseover', handleMouseOver, true);
   document.removeEventListener('click', handleCaptureClick, true);
-  document.removeEventListener('blur', handleInputBlur, true);
+  document.removeEventListener('focusout', handleInputBlur, true);
 
   document.addEventListener('mouseover', handleMouseOver, true);
   document.addEventListener('click', handleCaptureClick, true);
-  document.addEventListener('blur', handleInputBlur, true);
+  document.addEventListener('focusout', handleInputBlur, true);
 }
 
 // マウスホバー時の赤枠追従
 function handleMouseOver(e) {
-  if (isPaused) return;
-  if (!controllerPanel) return;
-  
-  if (controllerPanel.contains(e.target) || e.target === highlightOverlay) {
-    highlightOverlay.style.display = 'none';
-    return;
-  }
-  
-  hoveredElement = e.target;
-  const rect = hoveredElement.getBoundingClientRect();
-  
-  if (rect.width === 0 || rect.height === 0) return;
+  try {
+    if (isPaused) return;
+    if (!controllerPanel) return;
+    if (!highlightOverlay) return;
+    
+    if (controllerPanel.contains(e.target) || e.target === highlightOverlay) {
+      highlightOverlay.style.display = 'none';
+      return;
+    }
+    
+    hoveredElement = e.target;
+    const rect = hoveredElement.getBoundingClientRect();
+    
+    if (rect.width === 0 || rect.height === 0) return;
 
-  highlightOverlay.style.width = `${rect.width + 4}px`;
-  highlightOverlay.style.height = `${rect.height + 4}px`;
-  highlightOverlay.style.left = `${rect.left + window.scrollX - 2}px`;
-  highlightOverlay.style.top = `${rect.top + window.scrollY - 2}px`;
-  highlightOverlay.style.display = 'block';
+    highlightOverlay.style.width = `${rect.width + 4}px`;
+    highlightOverlay.style.height = `${rect.height + 4}px`;
+    highlightOverlay.style.left = `${rect.left + window.scrollX - 2}px`;
+    highlightOverlay.style.top = `${rect.top + window.scrollY - 2}px`;
+    highlightOverlay.style.display = 'block';
+  } catch (err) {
+    // 想定外の要素で getBoundingClientRect が失敗するケースに備える
+    console.warn('handleMouseOver error', err);
+    if (highlightOverlay) highlightOverlay.style.display = 'none';
+  }
 }
 
-// 4. クリックされた瞬間のキャプチャとドキュメント化
+// クリックされた瞬間のキャプチャとドキュメント化
 async function handleCaptureClick(e) {
   if (isPaused) return;
   if (!controllerPanel) return;
   if (controllerPanel.contains(e.target)) return; 
+
+  // パスワードや敏感入力は記録しない
   if (e.target.tagName === 'INPUT' && e.target.type === 'password') return;
 
+  // remove listener を行うが、失敗時は finally ブロックで復帰させる
   document.removeEventListener('click', handleCaptureClick, true);
 
-  const targetText = e.target.innerText ? `「${e.target.innerText.trim().substring(0, 20)}」` : '';
-  const targetId = e.target.id ? `#${e.target.id}` : '';
-  const description = `${e.target.tagName.toLowerCase()}${targetId}要素 ${targetText} をクリックしました。`;
+  const el = e.target;
+  // contenteditable 対応（div 等）
+  const textContent = (el.innerText || el.textContent || '').trim();
+  const targetText = textContent ? `「${textContent.substring(0, 20)}」` : '';
+  const targetId = el.id ? `#${el.id}` : '';
+  const description = `${el.tagName.toLowerCase()}${targetId}要素 ${targetText} をクリックしました。`;
 
-  chrome.runtime.sendMessage({ action: "captureTab" }, (response) => {
+  try {
+    chrome.runtime.sendMessage({ action: "captureTab" }, (response) => {
+      if (chrome.runtime.lastError) {
+        console.warn('captureTab error:', chrome.runtime.lastError);
+      }
+      chrome.storage.local.get(['steps'], (result) => {
+        const currentSteps = result.steps || [];
+        currentSteps.push({
+          type: "クリック操作",
+          url: window.location.href,
+          details: description,
+          timestamp: new Date().toLocaleTimeString(),
+          screenshot: response && response.screenshot ? response.screenshot : null
+        });
+        chrome.storage.local.set({ steps: currentSteps }, () => {
+          // どんな場合でもリスナーを再登録
+          document.addEventListener('click', handleCaptureClick, true);
+        });
+      });
+    });
+  } catch (err) {
+    console.error('handleCaptureClick failed', err);
+    // 復帰を保証
+    document.addEventListener('click', handleCaptureClick, true);
+  }
+}
+
+// 5. 入力フォームの自動記録（focusout を使用）
+function handleInputBlur(e) {
+  if (isPaused) return;
+  const el = e.target;
+  if (!el) return;
+  if (el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA' && !el.isContentEditable) return;
+  if (el.type === 'password') return; 
+
+  // 値がない、もしくは空白だけなら記録しない
+  const value = (el.value || (el.isContentEditable ? el.innerText : '') || '').toString().trim();
+  if (!value) return;
+
+  // 敏感情報と推定される場合はマスク（もしくは記録しない）
+  let recordedValue = value;
+  if (isSensitiveInput(el)) {
+    recordedValue = '（敏感情報のためマスクされました）';
+  }
+
+  const targetId = el.id ? `#${el.id}` : '';
+  const description = `${el.tagName.toLowerCase()}${targetId} に「${recordedValue}」と入力しました。`;
+
+  try {
     chrome.storage.local.get(['steps'], (result) => {
       const currentSteps = result.steps || [];
       currentSteps.push({
-        type: "クリック操作",
+        type: "テキスト入力",
         url: window.location.href,
         details: description,
         timestamp: new Date().toLocaleTimeString(),
-        screenshot: response ? response.screenshot : null
+        screenshot: null
       });
-      chrome.storage.local.set({ steps: currentSteps }, () => {
-        document.addEventListener('click', handleCaptureClick, true);
-      });
+      chrome.storage.local.set({ steps: currentSteps });
     });
-  });
-}
-
-// 5. 入力フォームの自動記録
-function handleInputBlur(e) {
-  if (isPaused) return;
-  if (e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') return;
-  if (e.target.type === 'password') return; 
-  if (!e.target.value.trim()) return;
-
-  const targetId = e.target.id ? `#${e.target.id}` : '';
-  const description = `${e.target.tagName.toLowerCase()}${targetId} に「${e.target.value.trim()}」と入力しました。`;
-
-  chrome.storage.local.get(['steps'], (result) => {
-    const currentSteps = result.steps || [];
-    currentSteps.push({
-      type: "テキスト入力",
-      url: window.location.href,
-      details: description,
-      timestamp: new Date().toLocaleTimeString(),
-      screenshot: null
-    });
-    chrome.storage.local.set({ steps: currentSteps });
-  });
+  } catch (err) {
+    console.error('handleInputBlur failed', err);
+  }
 }
 
 // 一時停止/再開の切り替え
 function togglePause() {
   isPaused = !isPaused;
   const btn = document.getElementById('tango-pause');
+  if (!btn) return;
+  btn.setAttribute('aria-pressed', String(isPaused));
   if (isPaused) {
     btn.textContent = "▶";
     btn.style.background = "#22c55e";
@@ -161,6 +236,7 @@ function togglePause() {
     btn.textContent = "⏸";
     btn.style.background = "#334155";
   }
+  window.isPaused = isPaused;
 }
 
 // ワークフローの破棄
@@ -177,17 +253,30 @@ function finishWorkflow() {
       const htmlContent = generateTangoStyleReport(result.steps || []);
       const blob = new Blob([htmlContent], { type: 'text/html;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
-      chrome.runtime.sendMessage({ action: "openReport", url: url });
+      try {
+        chrome.runtime.sendMessage({ action: "openReport", url: url });
+      } catch (err) {
+        console.warn('openReport sendMessage failed', err);
+      }
     });
   });
 }
 
 function cleanup() {
-  if (highlightOverlay) highlightOverlay.remove();
-  if (controllerPanel) controllerPanel.remove();
+  if (highlightOverlay) {
+    try { highlightOverlay.remove(); } catch (e) { /* ignore */ }
+  }
+  if (controllerPanel) {
+    try { controllerPanel.remove(); } catch (e) { /* ignore */ }
+  }
   document.removeEventListener('mouseover', handleMouseOver, true);
   document.removeEventListener('click', handleCaptureClick, true);
-  document.removeEventListener('blur', handleInputBlur, true);
+  document.removeEventListener('focusout', handleInputBlur, true);
+  // window との同期を解除
+  window.highlightOverlay = null;
+  window.controllerPanel = null;
+  window.hoveredElement = null;
+  window.isPaused = isPaused;
 }
 
 // 手順書レポート出力用テンプレート
@@ -202,7 +291,7 @@ function generateTangoStyleReport(steps) {
         </div>
         <p class="step-details">${step.details}</p>
         <div class="url-bar">🔗 ${step.url}</div>
-        ${step.screenshot ? `<div class="img-container"><img src="${step.screenshot}"></div>` : '<p style="color:#94a3b8; font-size:13px; font-style:italic; margin:0;">(入力内容をタイムラインに記録しました)</p>'}
+        ${step.screenshot ? `<div class="img-container"><img src="${step.screenshot}" alt="screenshot"></div>` : '<p style="color:#94a3b8; font-size:13px; font-style:italic; margin:0;">(入力内容をタイムラインに記録しました)</p>'}
       </div>
     </div>
   `).join('');
