@@ -1,11 +1,12 @@
 {
   "manifest_version": 3,
-  "name": "Tango Light Recorder",
-  "version": "1.1",
-  "description": "Tango風の操作手順書自動作成ツール",
+  "name": "Step Recorder",
+  "version": "1.0.0",
+  "description": "Record user steps and generate a step-by-step report with screenshots.",
   "permissions": [
-    "activeTab",
     "storage",
+    "tabs",
+    "activeTab",
     "scripting"
   ],
   "background": {
@@ -18,7 +19,19 @@
       "run_at": "document_idle"
     }
   ],
+  "host_permissions": ["<all_urls>"],
   "action": {
-    "default_popup": "popup.html"
+    "default_title": "Step Recorder",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
   }
 }
