@@ -14,7 +14,8 @@ document.getElementById('startCapture').addEventListener('click', async () => {
               if (typeof initCaptureEnvironment === 'function') {
                 initCaptureEnvironment();
               } else {
-                // initCaptureEnvironment が未定義の場合はユーザーに通知（console）
+                // initCaptureEnvironment が未定義の場合はユーザーに通知
+                // （注意: alert をページ内で出すのはうるさいので、ここでは console に出す）
                 console.warn('initCaptureEnvironment not found in page context');
               }
             }
