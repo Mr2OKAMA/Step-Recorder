@@ -4,6 +4,51 @@ let controllerPanel = window.controllerPanel || null;
 let hoveredElement = window.hoveredElement || null;
 let isPaused = window.isPaused || false;
 
+// 安全に現在の URL を取得（クロスオリジン等でアクセスが拒否される場合に備える）
+function safeGetLocation() {
+  try {
+    if (window && window.location && typeof window.location.href === 'string') {
+      return window.location.href;
+    }
+  } catch (err) { /* ignore */ }
+  try {
+    if (document && document.location && typeof document.location.href === 'string') {
+      return document.location.href;
+    }
+  } catch (err) { /* ignore */ }
+  return '';
+}
+
+// HTML を安全にエスケープ（レポート埋め込み用）
+function escapeHTML(s) {
+  return String(s || '').replace(/[&<>"']/g, function (m) {
+    return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]);
+  });
+}
+
+// blob: または遠隔 URL を data:URL に変換する（失敗したら null を返す）
+async function urlToDataURL(url) {
+  if (!url) return null;
+  // 既に data: ならそのまま
+  if (url.startsWith('data:')) return url;
+  try {
+    // fetch して Blob を取得（同一コンテキストでアクセスできる場合）
+    const resp = await fetch(url);
+    if (!resp.ok) return null;
+    const blob = await resp.blob();
+    return await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => { reader.abort(); reject(new Error('FileReader error')); };
+      reader.onload = () => { resolve(reader.result); };
+      reader.readAsDataURL(blob);
+    });
+  } catch (err) {
+    // fetch が失敗（CORS、異なるオリジンの blob:、など）
+    console.warn('urlToDataURL failed', err);
+    return null;
+  }
+}
+
 // ページ読み込み時に録画ステータスをチェックして自動復元
 chrome.storage.local.get(['isRecording'], (result) => {
   if (result.isRecording) {
@@ -18,6 +63,7 @@ window.initCaptureEnvironment = function() {
   createControlPanel();
   createHighlightOverlay();
   startTracking();
+  window.isPaused = isPaused;
 };
 
 // 敏感入力かどうかを判定（マスク/記録除外ルール）
@@ -69,20 +115,20 @@ function createControlPanel() {
   btnDone.id = 'tango-done';
   btnDone.title = '完了';
   btnDone.textContent = '✓';
-  btnDone.style.cssText = 'background:#22c55e; border:none; color:white; border-radius:4px; width:26px; height:26px; font-size:12px; font-weight:bold; cursor:pointer; display:flex; align-items:center; justify-content:center;';
+  btnDone.style.cssText = 'background:#22c55e; border:none; color:white; border-radius:4px; width:32px; height:32px; font-size:14px; font-weight:bold; cursor:pointer; display:flex; align-items:center; justify-content:center;';
 
   const btnPause = document.createElement('button');
   btnPause.id = 'tango-pause';
   btnPause.title = '一時停止';
   btnPause.setAttribute('aria-pressed', String(isPaused));
-  btnPause.textContent = '⏸';
-  btnPause.style.cssText = 'background:#334155; border:none; color:white; border-radius:4px; width:26px; height:26px; font-size:11px; font-weight:bold; cursor:pointer; display:flex; align-items:center; justify-content:center;';
+  btnPause.textContent = isPaused ? '▶' : '⏸';
+  btnPause.style.cssText = `background:${isPaused ? '#22c55e' : '#334155'}; border:none; color:white; border-radius:4px; width:32px; height:32px; font-size:14px; font-weight:bold; cursor:pointer; display:flex; align-items:center; justify-content:center;`;
 
   const btnCancel = document.createElement('button');
   btnCancel.id = 'tango-cancel';
   btnCancel.title = '破棄';
   btnCancel.textContent = '🗑';
-  btnCancel.style.cssText = 'background:#ef4444; border:none; color:white; border-radius:4px; width:26px; height:26px; font-size:12px; font-weight:bold; cursor:pointer; display:flex; align-items:center; justify-content:center;';
+  btnCancel.style.cssText = 'background:#ef4444; border:none; color:white; border-radius:4px; width:32px; height:32px; font-size:14px; font-weight:bold; cursor:pointer; display:flex; align-items:center; justify-content:center;';
 
   controllerPanel.appendChild(btnDone);
   controllerPanel.appendChild(btnPause);
@@ -99,7 +145,6 @@ function createControlPanel() {
 
 // 3. マウスストーキング（追従）および入力の監視開始
 function startTracking() {
-  // focusout を使ってバブリングで捕まえる（blur はバブリングしない）
   document.removeEventListener('mouseover', handleMouseOver, true);
   document.removeEventListener('click', handleCaptureClick, true);
   document.removeEventListener('focusout', handleInputBlur, true);
@@ -124,7 +169,10 @@ function handleMouseOver(e) {
     hoveredElement = e.target;
     const rect = hoveredElement.getBoundingClientRect();
     
-    if (rect.width === 0 || rect.height === 0) return;
+    if (rect.width === 0 || rect.height === 0) {
+      highlightOverlay.style.display = 'none';
+      return;
+    }
 
     highlightOverlay.style.width = `${rect.width + 4}px`;
     highlightOverlay.style.height = `${rect.height + 4}px`;
@@ -132,7 +180,6 @@ function handleMouseOver(e) {
     highlightOverlay.style.top = `${rect.top + window.scrollY - 2}px`;
     highlightOverlay.style.display = 'block';
   } catch (err) {
-    // 想定外の要素で getBoundingClientRect が失敗するケースに備える
     console.warn('handleMouseOver error', err);
     if (highlightOverlay) highlightOverlay.style.display = 'none';
   }
@@ -144,43 +191,51 @@ async function handleCaptureClick(e) {
   if (!controllerPanel) return;
   if (controllerPanel.contains(e.target)) return; 
 
-  // パスワードや敏感入力は記録しない
-  if (e.target.tagName === 'INPUT' && e.target.type === 'password') return;
+  try {
+    if (e.target.tagName === 'INPUT' && (e.target.type || '').toLowerCase() === 'password') return;
+  } catch (err) { /* ignore */ }
 
-  // remove listener を行うが、失敗時は finally ブロックで復帰させる
+  // 一時的にリスナーを外す（復帰は必ず行う）
   document.removeEventListener('click', handleCaptureClick, true);
 
   const el = e.target;
-  // contenteditable 対応（div 等）
-  const textContent = (el.innerText || el.textContent || '').trim();
+  const textContent = (el && (el.innerText || el.textContent) ? (el.innerText || el.textContent) : '').trim();
   const targetText = textContent ? `「${textContent.substring(0, 20)}」` : '';
-  const targetId = el.id ? `#${el.id}` : '';
-  const description = `${el.tagName.toLowerCase()}${targetId}要素 ${targetText} をクリックしました。`;
+  const targetId = (el && el.id) ? `#${el.id}` : '';
+  const description = `${el && el.tagName ? el.tagName.toLowerCase() : 'element'}${targetId} 要素 ${targetText} をクリックしました。`;
+  const url = safeGetLocation();
 
   try {
-    chrome.runtime.sendMessage({ action: "captureTab" }, (response) => {
+    chrome.runtime.sendMessage({ action: "captureTab" }, async (response) => {
       if (chrome.runtime.lastError) {
         console.warn('captureTab error:', chrome.runtime.lastError);
       }
+      let screenshot = response && response.screenshot ? response.screenshot : null;
+
+      // screenshot を data:URL に変換（可能なら）
+      if (screenshot && !screenshot.startsWith('data:')) {
+        const converted = await urlToDataURL(screenshot);
+        if (converted) screenshot = converted;
+        else screenshot = null;
+      }
+
       chrome.storage.local.get(['steps'], (result) => {
         const currentSteps = result.steps || [];
         currentSteps.push({
           type: "クリック操作",
-          url: window.location.href,
+          url: url,
           details: description,
           timestamp: new Date().toLocaleTimeString(),
-          screenshot: response && response.screenshot ? response.screenshot : null
+          screenshot: screenshot // data:URL または null
         });
         chrome.storage.local.set({ steps: currentSteps }, () => {
-          // どんな場合でもリスナーを再登録
-          document.addEventListener('click', handleCaptureClick, true);
+          try { document.addEventListener('click', handleCaptureClick, true); } catch (err) { console.warn('re-add click failed', err); }
         });
       });
     });
   } catch (err) {
     console.error('handleCaptureClick failed', err);
-    // 復帰を保証
-    document.addEventListener('click', handleCaptureClick, true);
+    try { document.addEventListener('click', handleCaptureClick, true); } catch (e) { /* ignore */ }
   }
 }
 
@@ -190,13 +245,13 @@ function handleInputBlur(e) {
   const el = e.target;
   if (!el) return;
   if (el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA' && !el.isContentEditable) return;
-  if (el.type === 'password') return; 
+  try {
+    if ((el.type || '').toLowerCase() === 'password') return; 
+  } catch (err) { /* ignore */ }
 
-  // 値がない、もしくは空白だけなら記録しない
   const value = (el.value || (el.isContentEditable ? el.innerText : '') || '').toString().trim();
   if (!value) return;
 
-  // 敏感情報と推定される場合はマスク（もしくは記録しない）
   let recordedValue = value;
   if (isSensitiveInput(el)) {
     recordedValue = '（敏感情報のためマスクされました）';
@@ -204,13 +259,14 @@ function handleInputBlur(e) {
 
   const targetId = el.id ? `#${el.id}` : '';
   const description = `${el.tagName.toLowerCase()}${targetId} に「${recordedValue}」と入力しました。`;
+  const url = safeGetLocation();
 
   try {
     chrome.storage.local.get(['steps'], (result) => {
       const currentSteps = result.steps || [];
       currentSteps.push({
         type: "テキスト入力",
-        url: window.location.href,
+        url: url,
         details: description,
         timestamp: new Date().toLocaleTimeString(),
         screenshot: null
@@ -257,6 +313,7 @@ function finishWorkflow() {
         chrome.runtime.sendMessage({ action: "openReport", url: url });
       } catch (err) {
         console.warn('openReport sendMessage failed', err);
+        try { window.open(url, '_blank'); } catch (e) { /* ignore */ }
       }
     });
   });
@@ -279,22 +336,37 @@ function cleanup() {
   window.isPaused = isPaused;
 }
 
-// 手順書レポート出力用テンプレート
+// 手順書レポート出力用テンプレート（編集機能付き）
 function generateTangoStyleReport(steps) {
-  let rows = steps.map((step, idx) => `
-    <div class="step-card">
-      <div class="step-number">${idx + 1}</div>
-      <div class="step-content">
-        <div class="step-header">
-          <span class="step-badge">${step.type}</span>
-          <span class="step-time">${step.timestamp}</span>
+  // 安全に HTML を作るために escapeHTML を使う（URL/詳細はエスケープ）
+  const rows = (steps || []).map((step, idx) => {
+    const type = escapeHTML(step.type || '操作');
+    const time = escapeHTML(step.timestamp || '');
+    const details = escapeHTML(step.details || '');
+    const url = escapeHTML(step.url || '');
+    const screenshot = step.screenshot || null;
+
+    const screenshotHtml = screenshot
+      ? `<a class="screenshot-link" href="${screenshot}" target="_blank" rel="noopener noreferrer" title="フルサイズで開く">
+           <div class="img-container"><img src="${screenshot}" alt="screenshot"></div>
+         </a>`
+      : `<p class="no-screenshot" style="color:#94a3b8; font-size:13px; font-style:italic; margin:0;">(スクリーンショットはありません)</p>`;
+
+    return `
+      <div class="step-card" data-step-index="${idx}">
+        <div class="step-number">${idx + 1}</div>
+        <div class="step-content">
+          <div class="step-header">
+            <span class="step-badge">${type}</span>
+            <span class="step-time">${time}</span>
+          </div>
+          <p class="step-details" data-original="${details}">${details}</p>
+          <div class="url-bar">🔗 ${url}</div>
+          ${screenshotHtml}
         </div>
-        <p class="step-details">${step.details}</p>
-        <div class="url-bar">🔗 ${step.url}</div>
-        ${step.screenshot ? `<div class="img-container"><img src="${step.screenshot}" alt="screenshot"></div>` : '<p style="color:#94a3b8; font-size:13px; font-style:italic; margin:0;">(入力内容をタイムラインに記録しました)</p>'}
       </div>
-    </div>
-  `).join('');
+    `;
+  }).join('');
 
   return `
     <!DOCTYPE html>
@@ -306,32 +378,143 @@ function generateTangoStyleReport(steps) {
         body { font-family: system-ui, -apple-system, sans-serif; background: #f8fafc; margin: 0; padding: 40px 20px; color: #1e293b; }
         .container { max-width: 760px; margin: 0 auto; }
         h1 { font-size: 28px; color: #0f172a; margin-bottom: 8px; }
-        .meta { color: #64748b; font-size: 14px; margin-bottom: 40px; }
+        .meta { color: #64748b; font-size: 14px; margin-bottom: 20px; }
         .step-card { display: flex; gap: 20px; margin-bottom: 40px; position: relative; }
-        .step-number { width: 32px; height: 32px; background: #4f46e5; color: white; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 14px; flex-shrink: 0; }
-        .step-content { background: white; border-radius: 12px; padding: 24px; flex-grow: 1; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; }
+        .step-number { width: 40px; min-width:40px; height: 40px; background: #4f46e5; color: white; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 16px; }
+        .step-content { background: white; border-radius: 12px; padding: 20px; flex-grow: 1; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; position: relative; }
         .step-header { display: flex; justify-content: space-between; margin-bottom: 12px; align-items: center; }
         .step-badge { background: #eef2ff; color: #4f46e5; font-size: 11px; font-weight: bold; padding: 4px 8px; border-radius: 4px; }
         .step-time { color: #94a3b8; font-size: 12px; }
-        .step-details { font-size: 16px; font-weight: 500; margin: 0 0 8px 0; line-height: 1.5; }
-        .url-bar { font-size: 12px; color: #64748b; background: #f1f5f9; padding: 4px 8px; border-radius: 6px; word-break: break-all; margin-bottom: 16px; }
-        .img-container { width: 100%; border-radius: 8px; overflow: hidden; border: 1px solid #cbd5e1; }
-        img { width: 100%; height: auto; display: block; }
+        .step-details { font-size: 16px; font-weight: 500; margin: 0 0 8px 0; line-height: 1.5; white-space: pre-wrap; }
+        .url-bar { font-size: 12px; color: #64748b; background: #f1f5f9; padding: 6px 8px; border-radius: 6px; word-break: break-all; margin-bottom: 12px; }
+        .img-container { width: 100%; max-height: 320px; border-radius: 8px; overflow: hidden; border: 1px solid #cbd5e1; display:flex; align-items:center; justify-content:center; background:#ffffff; }
+        .img-container img { width: 100%; height: auto; display: block; object-fit:contain; }
         .actions { margin-bottom: 20px; display: flex; gap: 10px; }
         .btn { padding: 10px 16px; font-weight: bold; border-radius: 6px; border: none; cursor: pointer; font-size: 14px; }
         .btn-print { background: #0f172a; color: white; }
-        @media print { .actions { display: none; } body { background: white; padding: 0; } .step-content { box-shadow: none; border: none; padding: 10px 0; } .step-card { page-break-inside: avoid; } }
+        .btn-export { background: #4f46e5; color: white; }
+        .step-controls { position: absolute; top: 12px; right: 12px; display:flex; gap:8px; }
+        .ctrl-btn { background: #eef2ff; border: 1px solid #e6e9ef; color: #334155; padding:6px 8px; border-radius:6px; font-size:12px; cursor:pointer; }
+        .ctrl-btn.danger { background:#fee2e2; border-color:#fca5a5; color:#7f1d1d; }
+        .editable { outline: 2px dashed rgba(79,70,229,0.25); padding: 4px; border-radius:6px; }
+        @media print { .actions { display: none; } body { background: white; padding: 0; } .step-content { box-shadow: none; border: none; padding: 10px 0; } .step-card { page-break-inside: avoid; } .img-container { max-height: none; } }
       </style>
     </head>
     <body>
       <div class="container">
         <div class="actions">
           <button class="btn btn-print" onclick="window.print()">PDFとして保存 / 印刷</button>
+          <button class="btn btn-export" id="exportBtn">編集結果をダウンロード</button>
         </div>
         <h1>操作手順マニュアル</h1>
-        <div class="meta">作成日時: ${new Date().toLocaleString()} | Step Recorder によって自動生成</div>
+        <div class="meta">作成日時: ${escapeHTML(new Date().toLocaleString())} | Step Recorder によって自動生成</div>
         ${rows}
       </div>
+
+      <script>
+        (function(){
+          function makeBtn(text, className) {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.className = 'ctrl-btn ' + (className||'');
+            b.textContent = text;
+            return b;
+          }
+
+          function addControls() {
+            document.querySelectorAll('.step-card').forEach(card => {
+              const content = card.querySelector('.step-content');
+              if (!content) return;
+              const controls = document.createElement('div');
+              controls.className = 'step-controls';
+
+              const editBtn = makeBtn('編集', '');
+              const delImgBtn = makeBtn('画像削除', 'danger');
+              const restoreImgBtn = makeBtn('画像復元', '');
+              restoreImgBtn.style.display = 'none';
+
+              controls.appendChild(editBtn);
+              controls.appendChild(delImgBtn);
+              controls.appendChild(restoreImgBtn);
+              content.appendChild(controls);
+
+              const details = content.querySelector('.step-details');
+              const imgContainer = content.querySelector('.img-container');
+
+              let originalDetails = details ? details.innerText : '';
+              let originalImgHTML = imgContainer ? imgContainer.outerHTML : null;
+
+              editBtn.addEventListener('click', () => {
+                if (!details) return;
+                const isEditing = details.isContentEditable;
+                if (!isEditing) {
+                  details.contentEditable = 'true';
+                  details.classList.add('editable');
+                  editBtn.textContent = '保存';
+                  // focus and move caret to end
+                  details.focus();
+                  const range = document.createRange();
+                  range.selectNodeContents(details);
+                  range.collapse(false);
+                  const sel = window.getSelection();
+                  sel.removeAllRanges();
+                  sel.addRange(range);
+                } else {
+                  // save
+                  details.contentEditable = 'false';
+                  details.classList.remove('editable');
+                  editBtn.textContent = '編集';
+                  originalDetails = details.innerText;
+                }
+              });
+
+              delImgBtn.addEventListener('click', () => {
+                if (!imgContainer) return;
+                originalImgHTML = imgContainer.outerHTML;
+                imgContainer.remove();
+                delImgBtn.style.display = 'none';
+                restoreImgBtn.style.display = '';
+              });
+
+              restoreImgBtn.addEventListener('click', () => {
+                if (!originalImgHTML) return;
+                // insert restored HTML at url-bar's next sibling
+                const urlBar = content.querySelector('.url-bar');
+                const wrapper = document.createElement('div');
+                wrapper.innerHTML = originalImgHTML;
+                if (urlBar && urlBar.nextSibling) {
+                  urlBar.parentNode.insertBefore(wrapper.firstChild, urlBar.nextSibling);
+                } else if (content) {
+                  content.appendChild(wrapper.firstChild);
+                }
+                delImgBtn.style.display = '';
+                restoreImgBtn.style.display = 'none';
+              });
+
+            });
+          }
+
+          function exportHtml() {
+            // produce full HTML from document
+            const doctype = '<!DOCTYPE html>';
+            const html = doctype + '\n' + document.documentElement.outerHTML;
+            const blob = new Blob([html], { type: 'text/html' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'step-report.html';
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
+          }
+
+          document.addEventListener('DOMContentLoaded', () => {
+            addControls();
+            const exportBtn = document.getElementById('exportBtn');
+            if (exportBtn) exportBtn.addEventListener('click', exportHtml);
+          });
+        })();
+      </script>
     </body>
     </html>
   `;
